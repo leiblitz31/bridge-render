@@ -1,0 +1,174 @@
+name: render-bridge
+
+on:
+  workflow_dispatch:
+    inputs:
+      composition:
+        description: "Composition id"
+        required: false
+        default: "BridgeShort"
+      frames:
+        description: "Frame range, kosong = semua"
+        required: false
+        default: ""
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Clone template + copy bridge
+        run: |
+          git clone --depth 1 https://github.com/mromidev/claude-animated-shorts cas
+          mkdir -p bridge/src/videos bridge/public/bridge/kenney
+          cp -r cas/templates/bridge/* bridge/src/videos/bridge/
+          ls bridge/src/videos/bridge/
+
+      - name: Download Kenney kits (CC0)
+        run: |
+          mkdir -p kits && cd kits
+          for slug in nature-kit city-kit-commercial city-kit-suburban holiday-kit food-kit; do
+            curl -sSL -A "Mozilla/5.0" "https://kenney.nl/assets/$slug" -o "$slug.html"
+            ID=$(grep -oE "download-id='[^']+'" "$slug.html" | head -1 | sed "s/download-id='//;s/'//")
+            URL=$(curl -sS -A "Mozilla/5.0" -H "Referer: https://kenney.nl/assets/$slug" \
+                  "https://kenney.nl/download-link/$ID" | python3 -c "import sys,json;print(json.load(sys.stdin)['url'])")
+            curl -sSL -A "Mozilla/5.0" "$URL" -o "$slug.zip"
+            echo "$slug $(stat -c%s $slug.zip)"
+          done
+          for z in nature-kit city-kit-commercial city-kit-suburban holiday-kit food-kit; do
+            mkdir -p "$z" && unzip -q -o "$z.zip" -d "$z"
+          done
+
+      - name: Collect 26 models
+        run: |
+          cat > collect.py <<'PY'
+          import os, shutil
+          SRC = ["kits/nature-kit","kits/city-kit-commercial","kits/city-kit-suburban",
+                 "kits/holiday-kit","kits/food-kit"]
+          DST = "bridge/public/bridge/kenney"
+          NEEDED = ("banner-green banner-red canoe cart flower_purpleA flower_redA flower_yellowA "
+                    "grass grass_large hedge lantern lily_large plant_bush plant_bushDetailed "
+                    "plant_bushLarge stall-bench stall-green stall-red tree tree-high-round tree_cone "
+                    "tree_default tree_detailed tree_fat tree_oak windmill").split()
+          ALIAS = {"banner-green":["detail-awning"],"banner-red":["detail-awning-wide"],
+                   "cart":["carton"],"hedge":["plant_bushLarge"],"lantern":["lantern"],
+                   "stall-bench":["detail-parasol-a"],"stall-green":["detail-parasol-b"],
+                   "stall-red":["detail-parasol-a"],"tree":["tree_thin"],
+                   "tree-high-round":["tree_tall"],"windmill":["building-type-a"]}
+          idx = {}
+          for r in SRC:
+              for dp,_,fs in os.walk(r):
+                  for fn in fs:
+                      if fn.lower().endswith(".glb"):
+                          idx.setdefault(fn[:-4].lower(), os.path.join(dp,fn))
+          os.makedirs(DST, exist_ok=True)
+          exact=[];alias=[];miss=[]
+          for n in NEEDED:
+              if n.lower() in idx:
+                  shutil.copy2(idx[n.lower()], DST+"/"+n+".glb"); exact.append(n); continue
+              g=None
+              for c in ALIAS.get(n,[]):
+                  if c.lower() in idx: g=(c, idx[c.lower()]); break
+              if g: shutil.copy2(g[1], DST+"/"+n+".glb"); alias.append(n+"<-"+g[0])
+              else: miss.append(n)
+          print("exact",len(exact),"alias",len(alias),"missing",miss)
+          assert not miss, f"model hilang: {miss}"
+          print("total", len(os.listdir(DST)))
+          PY
+          mkdir -p bridge/public/bridge/kenney/Textures
+          cp "kits/city-kit-commercial/Models/GLB format/Textures/colormap.png" \
+             bridge/public/bridge/kenney/Textures/colormap.png
+          python3 collect.py
+
+      - name: Install deps
+        working-directory: bridge
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm i --no-audit --no-fund \
+            remotion@4.0.547 @remotion/cli@4.0.547 @remotion/three@4.0.547 \
+            three@0.187.0 @react-three/fiber@9.8.2 \
+            @react-three/postprocessing@3.2.2 postprocessing@6.39.6 \
+            react@19 react-dom@19 typescript@5.6.3 2>&1 | tail -3
+
+      - name: Write config
+        working-directory: bridge
+        run: |
+          cat > remotion.config.ts <<'EOF'
+          import { Config } from "@remotion/cli/config";
+          Config.setChromiumFlags({
+            "enable-unsafe-swiftshader": true,
+            "use-gl": "angle",
+            "use-angle": "swiftshader",
+          });
+          Config.setConcurrency(4);
+          EOF
+          cat > src/index.ts <<'EOF'
+          import { registerRoot } from "remotion";
+          import { RemotionRoot } from "./Root";
+          registerRoot(RemotionRoot);
+          EOF
+          cat > src/Root.tsx <<'EOF'
+          import { Composition } from "remotion";
+          import { BridgeShort, BRIDGE_FRAMES } from "./videos/bridge/Bridge";
+          export const RemotionRoot: React.FC = () => (
+            <Composition id="BridgeShort" component={BridgeShort}
+              durationInFrames={BRIDGE_FRAMES} fps={30} width={1080} height={1920} />
+          );
+          EOF
+          cat > tsconfig.json <<'EOF'
+          {"compilerOptions":{"target":"ES2018","module":"ESNext","jsx":"react-jsx",
+          "strict":false,"esModuleInterop":true,"skipLibCheck":true,"moduleResolution":"node",
+          "resolveJsonModule":true,"isolatedModules":true,"noEmit":true,"lib":["DOM","ESNext"]},
+          "include":["src"]}
+          EOF
+          npx tsc --noEmit 2>&1 | head -5 || true
+
+      - name: Render
+        working-directory: bridge
+        env:
+          REMOTION_TMP: /tmp/rtmp
+        run: |
+          mkdir -p /tmp/rtmp out
+          FRAMES="${{ github.event.inputs.frames }}"
+          if [ -n "$FRAMES" ]; then
+            npx remotion render "${{ github.event.inputs.composition }}" out/bridge.mp4 \
+              --frames="$FRAMES" --concurrency=4 --timeout=300000 --log=verbose 2>&1 | tail -20
+          else
+            npx remotion render "${{ github.event.inputs.composition }}" out/bridge.mp4 \
+              --concurrency=4 --timeout=300000 --log=verbose 2>&1 | tail -20
+          fi
+          ls -la out/
+
+      - name: Audio + mux
+        working-directory: bridge
+        run: |
+          pip install --quiet numpy
+          cat > audio_gen.py <<'PY'
+          import numpy as np, wave
+          sr = 48000; dur = 2025/30
+          t = np.linspace(0, dur, int(sr*dur), endpoint=False)
+          pad = 0.12*np.sin(2*np.pi*110*t) + 0.08*np.sin(2*np.pi*165*t)
+          beat = 0.20*np.exp(-((t*2) % 1)*8) * np.sin(2*np.pi*70*t)
+          x = pad + beat; x = x/np.max(np.abs(x))*0.7
+          st = np.stack([x, np.roll(x,240)], axis=1)
+          w = wave.open("audio.wav","wb"); w.setnchannels(2); w.setsampwidth(2)
+          w.setframerate(sr); w.writeframes((st*32767).astype(np.int16).tobytes()); w.close()
+          print("audio", dur, "s")
+          PY
+          python3 audio_gen.py
+          ffmpeg -y -v error -i out/bridge.mp4 -i audio.wav \
+            -c:v copy -c:a aac -b:a 192k -shortest out/bridge_audio.mp4
+          ffprobe -v error -show_entries stream=codec_type,codec_name,width,height \
+            -of default=nw=1 out/bridge_audio.mp4
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-video
+          path: bridge/out/bridge_audio.mp4
+          if-no-files-found: error

@@ -87,6 +87,21 @@ jobs:
              bridge/public/bridge/kenney/Textures/colormap.png
           python3 collect.py
 
+      - name: Strip postprocessing (blank di SwiftShader)
+        working-directory: bridge
+        run: |
+          # EffectComposer tidak jalan di software GL -> frame blank.
+          # Tanpa post, world tampil normal (flat-shaded).
+          python3 - <<'PY'
+          p = "src/videos/bridge/Bridge.tsx"
+          s = open(p).read()
+          s = s.replace("<primitive object={world.root} dispose={null} />\n      {post}",
+                        "<primitive object={world.root} dispose={null} />")
+          open(p, "w").write(s)
+          assert "{post}" not in s, "post masih ada"
+          print("post dihapus: OK")
+          PY
+
       - name: Install deps
         working-directory: bridge
         run: |

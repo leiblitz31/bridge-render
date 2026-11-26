@@ -26,7 +26,8 @@ jobs:
       - name: Clone template + copy bridge
         run: |
           git clone --depth 1 https://github.com/mromidev/claude-animated-shorts cas
-          mkdir -p bridge/src/videos bridge/public/bridge/kenney
+          ls cas/templates/ 2>/dev/null || ls cas/
+          mkdir -p bridge/src/videos/bridge bridge/public/bridge/kenney
           cp -r cas/templates/bridge/* bridge/src/videos/bridge/
           ls bridge/src/videos/bridge/
 
